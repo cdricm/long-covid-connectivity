@@ -1,0 +1,19 @@
+# Python bytecode / cache
+__pycache__/
+*.pyc
+
+# IDE
+.idea/
+
+# Analysis outputs (frozen results tree; lives outside the repo, ignored defensively)
+analysis_outputs/
+pre_analysis/
+
+# Raw / intermediate data (NIfTI, cached arrays)
+*.nii
+*.nii.gz
+*.npy
+*.npz
+
+# Joblib temp
+tmp_joblib/
