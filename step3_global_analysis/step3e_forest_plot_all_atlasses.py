@@ -151,8 +151,8 @@ fig.legend(handles=sig_legend, loc="lower center", ncol=2, fontsize=9,
 axes[2].legend(handles=sig_legend, loc="lower right", fontsize=8, framealpha=0.95)
 
 fig.suptitle("Family A — Cohen's d with 95 % CI across atlases  "
-             "(positive d -> COVID > CONTROL; naive label permutation, "
-             "no covariates)", fontsize=12, y=1.01)
+             "(positive d -> COVID > CONTROL; Freedman–Lane permutation, "
+             "age + sex adjusted)", fontsize=12, y=1.01)
 plt.tight_layout(rect=[0, 0.03, 1, 1])   # leave room at bottom for fig.legend
 out_png = os.path.join(OUT_DIR, "forest_plot_family_a.png")
 plt.savefig(out_png, dpi=200, bbox_inches="tight")
@@ -191,7 +191,7 @@ for ax, (rng, title) in zip(axes, VOLCANO_RANGES):
     ax.set_xlabel("Cohen's d (COVID - CONTROL)", fontsize=10)
     ax.grid(alpha=0.3)
 
-axes[0].set_ylabel("-log10(p_perm)  [primary, naive permutation]", fontsize=10)
+axes[0].set_ylabel("-log10(p_perm)  [primary, Freedman–Lane permutation]", fontsize=10)
 
 atlas_legend = [Line2D([0], [0], marker="o", color="w",
                        markerfacecolor=ATLAS_COLORS[a], label=a, markersize=9)
@@ -218,7 +218,7 @@ print(f"Volcano plot saved: {volcano_png}")
 # Sanity print
 # ============================================================
 print("\nValues plotted (d [CI], p_perm, p_fdr):")
-for rng, metrics, _, _ in PANELS:
+for rng, metrics, _ in PANELS:
     print(f"\n--- Range: {rng} ---")
     sub = all_df[all_df["range"] == rng]
     for metric in metrics:

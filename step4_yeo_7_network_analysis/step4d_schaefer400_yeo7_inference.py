@@ -30,7 +30,9 @@ def _find_step3d_dir(root):
 
 _STEP3_DIR = _find_step3d_dir(_HERE.parents[1])
 sys.path.insert(0, str(_STEP3_DIR))
-from step3d_auc_pipeline import naive_permutation, cohens_d
+from step3d_auc_pipeline import (
+    freedman_lane_permutation, cohens_d, load_covariates,
+)
 
 import os
 import numpy as np
@@ -77,43 +79,65 @@ print(f"Cohort verified against config: N={len(expected)} "
       f"(COVID={n_covid}, CONTROL={n_control})")
 
 # Hard cohort guard: Family B runs on the full frozen cohort, no covariate-driven
-# subject drop (Entscheidung B).
+# subject drop (all 162 retained; covariates adjust, they do not exclude).
 assert len(expected) == 162 and n_covid == 123 and n_control == 39, \
     "cohort deviates from frozen 162 (123/39)"
 
+# --- R2 ②: attach the covariate model (age, sex) per subject to both
+#     aggregations, so it aligns to y row-for-row inside run_family. Same loader /
+#     same covariate model as Family A (supervisor: identical model all outcomes).
+_cov, _sex_map = load_covariates(sorted(expected))
+df_fisher = df_fisher.merge(_cov, left_on="subject_id", right_on="subject",
+                            how="left", validate="one_to_one")
+df_raw    = df_raw.merge(_cov, left_on="subject_id", right_on="subject",
+                         how="left", validate="one_to_one")
+for _name, _d in [("fisher", df_fisher), ("raw", df_raw)]:
+    if _d[["age", "sex_code"]].isna().any().any():
+        _bad = sorted(_d.loc[_d[["age", "sex_code"]].isna().any(axis=1), "subject_id"])
+        raise RuntimeError(f"{_name}: covariate merge left NaNs for {_bad}")
+
 # ============================================================
-# INFERENCE (naive permutation primary; no covariates)
+# INFERENCE — R2 ②: Freedman–Lane covariate-adjusted permutation (primary;
+# OLS group-coefficient t, age + sex adjusted). Same model as Family A.
 # ============================================================
 def run_family(df, family_cols, family_name, agg_label, substreams, offset):
-    """One test family. Naive permutation primary (Welch-t statistic, no
-    covariates), Welch parametric sensitivity, raw Cohen's d. Returns DataFrame;
-    FDR-BH applied within family."""
+    """One test family. PRIMARY = Freedman–Lane covariate-adjusted permutation
+    (OLS group-coefficient t, age + sex adjusted); parametric p of the same
+    adjusted coefficient as sensitivity; raw Cohen's d (unadjusted descriptive).
+    Returns DataFrame; FDR-BH applied within family."""
     print(f"\n=== {agg_label} | family '{family_name}' ({len(family_cols)} tests) ===")
     rows = []
     for i, col in enumerate(family_cols):
-        g = df["group"].map({GROUP_A: 0, GROUP_B: 1}).values.astype(int)
+        g = df["group"].map({GROUP_A: 0, GROUP_B: 1}).values.astype(float)
         y = df[col].values.astype(float)
+        Z = df[["age", "sex_code"]].values.astype(float)   # (n, 2): age, sex_code
+        keep = ~np.isnan(g) & np.isfinite(y) & np.isfinite(Z).all(axis=1)
+        y, g, Z = y[keep], g[keep], Z[keep]
         a, b = y[g == 0], y[g == 1]   # a=CONTROL, b=COVID
 
-        # PRIMARY: naive permutation (Welch-t statistic), one substream per test
-        perm = naive_permutation(y, g, N_PERMUTATIONS, substreams[offset + i])
-        # SENSITIVITY: parametric Welch (same statistic, t-distribution null)
-        t_welch, p_welch = stats.ttest_ind(b, a, equal_var=False)
-        # EFFECT: raw Cohen's d + CI
+        # PRIMARY: Freedman–Lane covariate-adjusted permutation (group-coeff t),
+        # one substream per test (assignment unchanged from R1).
+        perm = freedman_lane_permutation(y, g, Z, N_PERMUTATIONS,
+                                         substreams[offset + i],
+                                         se_type=config.FL_SE_TYPE)
+        # SENSITIVITY: parametric p of the SAME adjusted group coefficient.
+        t_welch, p_welch = perm["t_obs"], perm["p_param"]
+        # EFFECT: raw Cohen's d + CI (unadjusted descriptive)
         d, d_lo, d_hi = cohens_d(a, b)
 
         rows.append({
             "measure": col, "family": family_name,
-            "n_covid": n_covid, "n_control": n_control,
+            "n_covid": int((g == 1).sum()), "n_control": int((g == 0).sum()),
             "mean_covid": b.mean(), "mean_control": a.mean(),
             "mean_diff": b.mean() - a.mean(),
             "cohens_d": d, "ci_lower": d_lo, "ci_upper": d_hi,
-            "t_perm": perm["t_obs"],     # observed Welch-t = permutation statistic
-            "p_perm": perm["p_perm"],    # PRIMARY (permutation null)
-            "t_welch": t_welch, "p_welch": p_welch,  # sensitivity (parametric null)
+            "t_perm": perm["t_obs"],     # observed adjusted group-coefficient t
+            "p_perm": perm["p_perm"],    # PRIMARY (FL permutation null)
+            "t_welch": t_welch,          # = adjusted group-coefficient t
+            "p_welch": p_welch,          # SENSITIVITY: parametric p of adjusted t
         })
         print(f"  [{i+1}/{len(family_cols)}] {col}: d={d:+.3f} [{d_lo:+.3f},{d_hi:+.3f}] "
-              f"p_perm={perm['p_perm']:.4f} p_welch={p_welch:.4f}")
+              f"p_perm={perm['p_perm']:.4f} p_param={p_welch:.4f}")
 
     res = pd.DataFrame(rows)
     # FDR-BH WITHIN family — primary on p_perm; sensitivity on welch

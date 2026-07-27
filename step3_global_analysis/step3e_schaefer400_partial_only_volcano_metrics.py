@@ -32,7 +32,11 @@ STRATEGY = config.CONFIRMATORY_SIGN_STRATEGY
 
 ATLAS       = "schaefer400"
 ATLAS_LABEL = "Schaefer-400"
-CSV_PATH    = config.atlas_dir(ATLAS, "step3d_auc", strategy=STRATEGY) / "family_a_comparison.csv"
+# R2 ⑤: the partial Family-A output is the 7-test positive/negative sign-split,
+# written by step3d to the combined 'pos_neg_split' subdir (not the single
+# 'absolute' strategy tree). Read from there.
+_FAMILY_A_STRATEGY = "pos_neg_split" if config.FC_METHOD == "partial" else STRATEGY
+CSV_PATH    = config.atlas_dir(ATLAS, "step3d_auc", strategy=_FAMILY_A_STRATEGY) / "family_a_comparison.csv"
 
 AUC_METRICS = ["assortativity", "mean_clustering", "global_efficiency"]
 MOD_METRIC  = "modularity_q"
@@ -53,7 +57,7 @@ COLOR_SIG = "#d62728"   # survives FDR over the 4 confirmatory tests
 VOLCANO_RANGES = [("literature", "AUC 10-25 % (confirmatory)"),
                   ("broad",      "AUC 5-50 % (sensitivity)")]
 
-OUT_DIR = config.ensure(config.atlas_dir(ATLAS, "step3e_volcano", strategy=STRATEGY))
+OUT_DIR = config.ensure(config.atlas_dir(ATLAS, "step3e_volcano", strategy=_FAMILY_A_STRATEGY))
 
 # ============================================================
 # LOAD
@@ -83,17 +87,21 @@ for ax, (rng, title) in zip(axes, VOLCANO_RANGES):
     for _, r in plot_df.iterrows():
         fdr = r["p_perm_fdr"]
         survives = pd.notna(fdr) and fdr < 0.05
+        sg = r.get("subgraph", "positive")
+        base_col = COLOR_SIG if survives else COLOR_NS
+        # positive subgraph = filled; negative subgraph = open (face='none').
         ax.scatter(r["cohen_d"], r["neg_log10_p"],
-                   color=COLOR_SIG if survives else COLOR_NS,
+                   facecolor=(base_col if sg != "negative" else "none"),
+                   edgecolor=base_col,
                    marker=METRIC_MARKERS.get(r["metric"], "x"),
-                   s=90, alpha=0.85)
+                   s=90, alpha=0.85, linewidths=1.6)
     ax.axvline(0, color="black", linestyle="--", linewidth=0.8)
     ax.axhline(-np.log10(0.05), color="gray", linestyle="--", linewidth=1)
     ax.set_title(title, fontsize=11)
     ax.set_xlabel("Cohen's d (COVID - CONTROL)", fontsize=10)
     ax.grid(alpha=0.3)
 
-axes[0].set_ylabel("-log10(p_perm)  [primary, naive permutation]", fontsize=10)
+axes[0].set_ylabel("-log10(p_perm)  [primary, Freedman-Lane permutation]", fontsize=10)
 
 metric_legend = [Line2D([0], [0], marker=METRIC_MARKERS[m], color="black",
                         linestyle="None", label=METRIC_LABELS[m], markersize=8)
@@ -107,6 +115,15 @@ tier_legend = [
 leg1 = axes[1].legend(handles=metric_legend, title="Metric", loc="upper right",
                       fontsize=9, framealpha=0.95)
 axes[1].add_artist(leg1)
+subgraph_legend = [
+    Line2D([0], [0], marker="o", color="black", markerfacecolor="black",
+           linestyle="None", markersize=9, label="positive subgraph"),
+    Line2D([0], [0], marker="o", color="black", markerfacecolor="none",
+           linestyle="None", markersize=9, label="negative subgraph"),
+]
+leg_sg = axes[0].legend(handles=subgraph_legend, title="Subgraph (⑤)",
+                        loc="upper right", fontsize=8, framealpha=0.95)
+axes[0].add_artist(leg_sg)
 axes[1].legend(handles=tier_legend, title="FDR tier", loc="lower right",
                fontsize=8, framealpha=0.95)
 
@@ -129,14 +146,14 @@ for rng, _ in VOLCANO_RANGES + [("single", "")]:
     sub = all_df[all_df["range"] == rng]
     metrics = AUC_METRICS if rng != "single" else [MOD_METRIC]
     for metric in metrics:
-        row = sub[sub["metric"] == metric]
-        if row.empty:
-            continue
-        r = row.iloc[0]
-        fdr = r["p_perm_fdr"]
-        fdr_s = f"{fdr:.3f}" if pd.notna(fdr) else "n/a"
-        tier = "FDR*" if (pd.notna(fdr) and fdr < 0.05) else \
-               ("raw*" if r["p_perm"] < 0.05 else "")
-        print(f"  {METRIC_LABELS[metric]:18s} "
-              f"d={r['cohen_d']:+.3f} [{r['d_ci_lo']:+.2f},{r['d_ci_hi']:+.2f}]  "
-              f"p_perm={r['p_perm']:.3f}  p_fdr={fdr_s} {tier}")
+        rows = sub[sub["metric"] == metric]
+        for _, r in rows.iterrows():   # one line per subgraph (pos/neg) if present
+            sg = r.get("subgraph", "positive")
+            fdr = r["p_perm_fdr"]
+            fdr_s = f"{fdr:.3f}" if pd.notna(fdr) else "n/a"
+            tier = "FDR*" if (pd.notna(fdr) and fdr < 0.05) else \
+                   ("raw*" if r["p_perm"] < 0.05 else "")
+            name = f"{METRIC_LABELS[metric]} [{sg}]"
+            print(f"  {name:28s} "
+                  f"d={r['cohen_d']:+.3f} [{r['d_ci_lo']:+.2f},{r['d_ci_hi']:+.2f}]  "
+                  f"p_perm={r['p_perm']:.3f}  p_fdr={fdr_s} {tier}")

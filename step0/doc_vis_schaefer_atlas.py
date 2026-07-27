@@ -1,6 +1,7 @@
 """
 Renders Schaefer-400 parcels coloured by Yeo-7 network on the inflated
-fsaverage surface (lateral + medial, both hemispheres).
+fsaverage surface (lateral + medial, both hemispheres). Parcel boundaries
+are baked into the ROI map as a dedicated black colour index.
 
 In: none (atlas + fsaverage surface fetched from nilearn 0.13.1).
 Out: figure_yeo7_surface.png
@@ -19,10 +20,11 @@ N_ROIS = 400
 YEO_NETWORKS = 7
 RESOLUTION_MM = 1         # deliberately 1mm (vs. the 2mm analysis atlas): smoother
                           # surface rendering only, no matrix computed here
-MESH = "fsaverage5"       # fsaverage5: lower-resolution mesh, sufficient for a figure
+MESH = "fsaverage6"       # denser than fsaverage5: one-vertex-wide borders stay thin
 OUT_DIR = "."
 OUT_BASENAME = "figure_yeo7_surface"
 DPI = 300
+BOUNDARY_ID = 0           # colour index reserved for parcel borders
 # =====================================================================
 
 YEO7_NAMES = [
@@ -67,6 +69,27 @@ def parse_network(label):
     raise ValueError(f"Could not parse network from label: {label!r}")
 
 
+def border_vertices(parcel_tex, faces):
+    """Vertices on a parcel border.
+
+    A vertex is a border vertex if it shares a face with a vertex carrying a
+    different non-zero parcel id. Only one side of each border is marked, so
+    the resulting line stays one vertex wide.
+    """
+    ids = np.rint(parcel_tex).astype(int)
+    mask = np.zeros(ids.shape[0], dtype=bool)
+
+    for a, b in ((0, 1), (1, 2), (2, 0)):
+        va, vb = faces[:, a], faces[:, b]
+        mixed = (ids[va] != ids[vb]) & (ids[va] > 0) & (ids[vb] > 0)
+        # mark the endpoint with the lower id only -> single-sided border
+        lower_is_a = ids[va] < ids[vb]
+        mask[va[mixed & lower_is_a]] = True
+        mask[vb[mixed & ~lower_is_a]] = True
+
+    return mask
+
+
 def main():
     print("Fetching Schaefer-400 atlas (Yeo-7) ...")
     atlas = datasets.fetch_atlas_schaefer_2018(
@@ -97,19 +120,28 @@ def main():
     print(f"Fetching {MESH} surface ...")
     fsavg = datasets.fetch_surf_fsaverage(mesh=MESH)
 
-    # Project the volumetric network image onto both hemispheres.
-    # 'nearest_most_frequent' keeps network ids discrete (no blending) and
-    # assigns each vertex the most frequent id in its neighbourhood.
+    # Project the network image and the original parcel image onto the surface.
+    # 'nearest_most_frequent' keeps ids discrete (no blending) and assigns each
+    # vertex the most frequent id in its neighbourhood. The parcel-id texture is
+    # required for the borders: within a network, neighbouring parcels share the
+    # network id and would show no border.
     print("Projecting volume to surface ...")
-    tex = {
-        "left": surface.vol_to_surf(
-            net_img, fsavg.pial_left, interpolation="nearest_most_frequent"),
-        "right": surface.vol_to_surf(
-            net_img, fsavg.pial_right, interpolation="nearest_most_frequent"),
-    }
+    roi_map = {}
+    for hemi, pial, infl in (("left", fsavg.pial_left, fsavg.infl_left),
+                             ("right", fsavg.pial_right, fsavg.infl_right)):
+        net_tex = surface.vol_to_surf(
+            net_img, pial, interpolation="nearest_most_frequent")
+        parcel_tex = surface.vol_to_surf(
+            atlas_img, pial, interpolation="nearest_most_frequent")
+        faces = surface.load_surf_mesh(infl).faces
+
+        m = np.rint(net_tex).astype(float)
+        m[m < 0.5] = np.nan                       # background -> transparent
+        m[border_vertices(parcel_tex, faces)] = BOUNDARY_ID
+        roi_map[hemi] = m
 
     colors = [tuple(c / 255.0 for c in YEO7_RGB[n]) for n in YEO7_NAMES]
-    cmap = ListedColormap(colors)
+    cmap = ListedColormap([(0.0, 0.0, 0.0)] + colors)   # index 0 = border
 
     views = [
         ("left",  "lateral", fsavg.infl_left,  fsavg.sulc_left),
@@ -122,19 +154,15 @@ def main():
         1, 4, figsize=(16, 4), subplot_kw={"projection": "3d"})
 
     for ax, (hemi, view, mesh, sulc) in zip(axes, views):
-        # Mask background so it is rendered transparently
-        roi = tex[hemi].copy()
-        roi[roi < 0.5] = np.nan
-
         plotting.plot_surf_roi(
             mesh,
-            roi_map=roi,
+            roi_map=roi_map[hemi],
             hemi=hemi,
             view=view,
             bg_map=sulc,
-            bg_on_data=True,
+            bg_on_data=False,
             cmap=cmap,
-            vmin=1,
+            vmin=BOUNDARY_ID,
             vmax=YEO_NETWORKS,
             axes=ax,
             figure=fig,

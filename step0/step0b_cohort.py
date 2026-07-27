@@ -125,14 +125,28 @@ def main():
         if "motion" in r or "fd" in r:           return "3_excl_motion"
         return "X_UNCLASSIFIED"
 
+    # Classify the excluded IDs into attrition stages WITHOUT relying on
+    # per-subject reasons in config (EXCLUDED_SUBJECTS is now a reason-free set).
+    # step0b reconstructs the stage from its own evidence: QC/duration verdicts
+    # come from step0a_qc_summary (df['verdict']/df['reason']); no-metadata cases
+    # are the CASE_B set; everything else excluded is motion (the supervisor-
+    # curated list, not otherwise encoded here).
+    qc_stage_of = {}
+    for _, r in df[df["verdict"].str.startswith("EXCLUDE")].iterrows():
+        qc_stage_of[str(r["subject_id"])] = stage_of(r["reason"])
+    case_b_set = set(case_b)
+
     by_stage, unclass = {}, []
-    for sid, rsn in config.EXCLUDED_SUBJECTS.items():
+    for sid in config.EXCLUDED_SUBJECTS:
         if sid not in data_ids:
             continue
-        st = stage_of(rsn)
+        if sid in qc_stage_of:
+            st = qc_stage_of[sid]
+        elif sid in case_b_set:
+            st = "2_excl_no_metadata"
+        else:
+            st = "3_excl_motion"   # by elimination: supervisor-curated motion list
         by_stage.setdefault(st, []).append(sid)
-        if st == "X_UNCLASSIFIED":
-            unclass.append((sid, rsn))
 
     flow = [["0_screened_nifti", *split(data_ids), "all NIfTI with data"]]
     for st in ["1_excl_qc", "2_excl_no_metadata", "3_excl_motion", "X_UNCLASSIFIED"]:

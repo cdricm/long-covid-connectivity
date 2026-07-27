@@ -74,17 +74,31 @@ def main():
     check_cohort(df, mod)
 
     values_long = pd.concat([auc_df, mod[auc_df.columns]], ignore_index=True)
+
+    # --- R2 ②: attach the covariate model (age, sex) per subject so it aligns
+    #     to y row-for-row inside compare_family_a (same loader/model as all atlases).
+    from step3d_auc_pipeline import load_covariates
+    subjects = sorted(values_long["subject"].unique())
+    cov, sex_map = load_covariates(subjects)
+    values_long = values_long.merge(cov, on="subject", how="left", validate="many_to_one")
+    miss = values_long[["age", "sex_code"]].isna().any(axis=1)
+    if miss.any():
+        bad = sorted(values_long.loc[miss, "subject"].unique())
+        raise RuntimeError(f"covariate merge left NaNs for subjects: {bad}")
+
     values_long.to_csv(os.path.join(OUT_DIR, "family_a_values.csv"), index=False)
     print(f"Family A values: {len(values_long)} rows "
           f"(3 AUC metrics x {len(AUC_RANGES)} ranges + Modularity single)\n")
-    # --- Inference (naive permutation primary; FDR over the 4 confirmatory tests) ---
-    print(f"Family A inference with {N_PERMUTATIONS} naive permutations "
-          f"(Welch-t statistic, no covariates)...")
+    # --- Inference: R2 ② Freedman–Lane covariate-adjusted permutation (primary;
+    #     OLS group-coefficient t), FDR over the 4 confirmatory tests. ---
+    print(f"Family A inference with {N_PERMUTATIONS} Freedman–Lane permutations "
+          f"(age + sex adjusted, OLS group-coefficient t)...")
     comp = compare_family_a(
         values_long,
         confirmatory_ranges=CONFIRMATORY_RANGES,
         group_a=config.GROUP_ORDER[0], group_b=config.GROUP_ORDER[1],
         n_permutations=N_PERMUTATIONS, seed=SEED,
+        covariate_cols=("age", "sex_code"), se_type=config.FL_SE_TYPE,
     )
     comp.to_csv(os.path.join(OUT_DIR, "family_a_comparison.csv"), index=False)
     plot_family_a(values_long, comp, OUT_DIR, ATLAS_LABEL,

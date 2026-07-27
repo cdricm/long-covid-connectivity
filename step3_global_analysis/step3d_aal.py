@@ -1,6 +1,6 @@
 """
-Step 3d (Family A inference) for AAL (SPM12, 116 ROIs) — ROBUSTNESS atlas: no
-independent confirmatory testing, no correction across atlases.
+Step 3d (Family A inference) for AAL (SPM12, 116 ROIs) — ROBUSTNESS atlas: no independent
+confirmatory testing, no correction across atlases.
 Family A = 4 global scalars: 3 AUC metrics (Global Efficiency, Mean Clustering,
 Assortativity) over the confirmatory 10-25 % range + signed Modularity Q*
 (single value, no AUC).
@@ -14,10 +14,8 @@ Writes into family_A/{strategy}/ (consistent with the Schaefer-400 wrapper).
 """
 import sys
 from pathlib import Path
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import config
-
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from step3d_auc_pipeline import (
     compute_auc, validate_range, check_cohort, compare_family_a, plot_family_a,
@@ -26,25 +24,25 @@ from step3d_auc_pipeline import (
 import os
 import pandas as pd
 
-ATLAS = "aal"
+ATLAS       = "aal"
 ATLAS_LABEL = "AAL (SPM12)"
-STRATEGY = config.CONFIRMATORY_SIGN_STRATEGY  # "positive" in the Pearson arm
+STRATEGY    = config.CONFIRMATORY_SIGN_STRATEGY   # "positive" in the Pearson arm
 
 METRICS_CSV = config.atlas_dir(
     ATLAS, f"step3c_metrics/{STRATEGY}", cross_strategy=True) / "step3c_metrics.csv"
-MOD_CSV = config.atlas_dir(ATLAS, "step3c_modularity") / "step3c_modularity.csv"
-OUT_DIR = config.ensure(config.atlas_dir(ATLAS, "step3d_auc", strategy=STRATEGY))
+MOD_CSV     = config.atlas_dir(ATLAS, "step3c_modularity") / "step3c_modularity.csv"
+OUT_DIR     = config.ensure(config.atlas_dir(ATLAS, "step3d_auc", strategy=STRATEGY))
 
-AUC_METRICS = ["global_efficiency", "mean_clustering", "assortativity"]
+AUC_METRICS         = ["global_efficiency", "mean_clustering", "assortativity"]
 # Range keys are part of the frozen analysis state: they determine the
 # alphabetical groupby order in compare_family_a and thus the assignment of
 # seed substreams to tests. Renaming them would change the permutation
 # p-values relative to METHODS_DECISIONS.md §6.
-AUC_RANGES = {"literature": config.AUC_RANGE_CONFIRMATORY,
-             "broad":      config.AUC_RANGE_SENSITIVITY}
-CONFIRMATORY_RANGES = ("literature", "single")  # literature AUC (3) + modularity single (1) = 4
-N_PERMUTATIONS = config.N_PERMUTATIONS
-SEED = config.SEED
+AUC_RANGES          = {"literature": config.AUC_RANGE_CONFIRMATORY,
+                       "broad":      config.AUC_RANGE_SENSITIVITY}
+CONFIRMATORY_RANGES = ("literature", "single")   # literature AUC (3) + modularity single (1) = 4
+N_PERMUTATIONS      = config.N_PERMUTATIONS
+SEED                = config.SEED
 
 
 def main():
@@ -70,26 +68,37 @@ def main():
     # --- Modularity Q* single value (NO AUC) -> range='single' ---
     mod = pd.read_csv(MOD_CSV)[["subject", "group", "modularity_q"]].dropna(subset=["modularity_q"])
     mod = mod.rename(columns={"modularity_q": "value"})
-    mod["range"] = "single";
-    mod["range_lo"] = float("nan");
-    mod["range_hi"] = float("nan")
-    mod["metric"] = "modularity_q";
-    mod["n_densities"] = 1
+    mod["range"] = "single"; mod["range_lo"] = float("nan"); mod["range_hi"] = float("nan")
+    mod["metric"] = "modularity_q"; mod["n_densities"] = 1
 
     check_cohort(df, mod)
 
     values_long = pd.concat([auc_df, mod[auc_df.columns]], ignore_index=True)
+
+    # --- R2 ②: attach the covariate model (age, sex) per subject so it aligns
+    #     to y row-for-row inside compare_family_a (same loader/model as all atlases).
+    from step3d_auc_pipeline import load_covariates
+    subjects = sorted(values_long["subject"].unique())
+    cov, sex_map = load_covariates(subjects)
+    values_long = values_long.merge(cov, on="subject", how="left", validate="many_to_one")
+    miss = values_long[["age", "sex_code"]].isna().any(axis=1)
+    if miss.any():
+        bad = sorted(values_long.loc[miss, "subject"].unique())
+        raise RuntimeError(f"covariate merge left NaNs for subjects: {bad}")
+
     values_long.to_csv(os.path.join(OUT_DIR, "family_a_values.csv"), index=False)
     print(f"Family A values: {len(values_long)} rows "
           f"(3 AUC metrics x {len(AUC_RANGES)} ranges + Modularity single)\n")
-    # --- Inference (naive permutation primary; FDR over the 4 confirmatory tests) ---
-    print(f"Family A inference with {N_PERMUTATIONS} naive permutations "
-          f"(Welch-t statistic, no covariates)...")
+    # --- Inference: R2 ② Freedman–Lane covariate-adjusted permutation (primary;
+    #     OLS group-coefficient t), FDR over the 4 confirmatory tests. ---
+    print(f"Family A inference with {N_PERMUTATIONS} Freedman–Lane permutations "
+          f"(age + sex adjusted, OLS group-coefficient t)...")
     comp = compare_family_a(
         values_long,
         confirmatory_ranges=CONFIRMATORY_RANGES,
         group_a=config.GROUP_ORDER[0], group_b=config.GROUP_ORDER[1],
         n_permutations=N_PERMUTATIONS, seed=SEED,
+        covariate_cols=("age", "sex_code"), se_type=config.FL_SE_TYPE,
     )
     comp.to_csv(os.path.join(OUT_DIR, "family_a_comparison.csv"), index=False)
     plot_family_a(values_long, comp, OUT_DIR, ATLAS_LABEL,

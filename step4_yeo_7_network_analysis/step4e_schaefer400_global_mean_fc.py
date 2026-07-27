@@ -7,8 +7,9 @@ Out: global_mean_fc_per_subject.csv, global_mean_fc_inference.csv,
      global_mean_fc_boxplot.png.
 
 Global mean FC per subject = mean over all 79,800 unique edges (upper
-triangle). Reuses naive_permutation/cohens_d from step3d_auc_pipeline, same
-scale as the network-level tests it contextualizes.
+triangle). Reuses freedman_lane_permutation/cohens_d from step3d_auc_pipeline
+(R2 ②: age+sex adjusted, same covariate model as the network-level tests it
+contextualizes).
 """
 
 import sys
@@ -23,7 +24,7 @@ def _find_step3d_dir(root):
             return cand
     raise FileNotFoundError(f"step3d_auc_pipeline.py not found under {root}")
 sys.path.insert(0, str(_find_step3d_dir(_HERE.parents[1])))
-from step3d_auc_pipeline import naive_permutation, cohens_d
+from step3d_auc_pipeline import freedman_lane_permutation, cohens_d, load_covariates
 
 import os
 import numpy as np
@@ -76,9 +77,17 @@ n_covid   = int((df_global["group"] == GROUP_B).sum())
 n_control = int((df_global["group"] == GROUP_A).sum())
 print(f"Groups: {df_global['group'].value_counts().to_dict()}")
 
-# Hard cohort guard (Entscheidung B: full frozen cohort, no covariate-driven drop).
+# Hard cohort guard (full frozen cohort; covariates adjust, they do not drop).
 assert len(subjects) == 162 and n_covid == 123 and n_control == 39, \
     "cohort deviates from frozen 162 (123/39)"
+
+# --- R2 ②: attach the covariate model (age, sex), same loader/model as A/B/C ---
+_cov, _sex_map = load_covariates(sorted(df_global["subject_id"]))
+df_global = df_global.merge(_cov, left_on="subject_id", right_on="subject",
+                            how="left", validate="one_to_one")
+if df_global[["age", "sex_code"]].isna().any().any():
+    _bad = sorted(df_global.loc[df_global[["age", "sex_code"]].isna().any(axis=1), "subject_id"])
+    raise RuntimeError(f"covariate merge left NaNs for {_bad}")
 
 # ============================================================
 # DESCRIPTIVE
@@ -89,21 +98,24 @@ for col in ["mean_fc_global_raw", "mean_fc_global_fisher"]:
     print(df_global.groupby("group")[col].agg(["mean", "std", "median", "min", "max"]).to_string())
 
 # ============================================================
-# INFERENCE — naive permutation (Welch-t statistic, no covariates), Welch
-# parametric sensitivity. NO FDR (sanity check, not a test family).
+# INFERENCE — R2 ②: Freedman-Lane covariate-adjusted permutation (OLS group-
+# coefficient t, age + sex adjusted). Parametric p of the same coefficient as
+# sensitivity. NO FDR (validity check, not a test family).
 # ============================================================
-print("\n\n=== Inference (naive permutation, no covariates; sanity check, no FDR) ===")
+print("\n\n=== Inference (Freedman-Lane, age+sex adjusted; sanity check, no FDR) ===")
 measures = ["mean_fc_global_fisher", "mean_fc_global_raw"]   # fisher primary first
 substreams = np.random.SeedSequence(SEED).spawn(len(measures))  # one per measure
 
 results = []
 for i, col in enumerate(measures):
-    g = df_global["group"].map({GROUP_A: 0, GROUP_B: 1}).values.astype(int)
+    g = df_global["group"].map({GROUP_A: 0, GROUP_B: 1}).values.astype(float)
     y = df_global[col].values.astype(float)
+    Z = df_global[["age", "sex_code"]].values.astype(float)
     a, b = y[g == 0], y[g == 1]
 
-    perm = naive_permutation(y, g, N_PERMUTATIONS, substreams[i])
-    t_welch, p_welch = stats.ttest_ind(b, a, equal_var=False)
+    perm = freedman_lane_permutation(y, g, Z, N_PERMUTATIONS, substreams[i],
+                                     se_type=config.FL_SE_TYPE)
+    t_welch, p_welch = perm["t_obs"], perm["p_param"]   # adjusted group-coeff t + parametric p
     d, d_lo, d_hi = cohens_d(a, b)
 
     results.append({
@@ -116,7 +128,7 @@ for i, col in enumerate(measures):
     print(f"\n{col}:")
     print(f"  COVID={b.mean():.4f}  CONTROL={a.mean():.4f}  diff={b.mean()-a.mean():+.4f}")
     print(f"  Cohen's d: {d:+.3f} [{d_lo:+.3f}, {d_hi:+.3f}]")
-    print(f"  p_perm (primary): {perm['p_perm']:.4f}   p_welch (sensitivity): {p_welch:.4f}")
+    print(f"  p_perm (primary): {perm['p_perm']:.4f}   p_param (sensitivity): {p_welch:.4f}")
 
 df_inference = pd.DataFrame(results)
 

@@ -3,14 +3,19 @@ Step 5: Network-Based Statistic (NBS) — Family C (edge-level inference).
 
 In:  config.atlas_dir("schaefer400", "step2_pipeline")/comet_matrices,
      step4a_labels/schaefer400_yeo7_roi_info.csv, config.GROUP_CSV.
-Out: nbs_summary.csv, nbs_components_<model>_<thr>.csv,
-     nbs_edges_<model>_<thr>.csv, nbs_null_<model>_<thr>.npz, nbs_console_log.txt.
+Out: nbs_summary.csv,
+     nbs_components_<model>_<contrast>_<thr>.csv,
+     nbs_edges_<model>_<contrast>_<thr>.csv,
+     nbs_null_<model>_<contrast>_<thr>.npz, nbs_console_log.txt.
 
 NBS (Zalesky et al. 2010): cluster-level permutation FWE on edge space via
 bct.nbs_bct, cluster statistic = component extent (edge count). Group order
-x=CONTROL, y=COVID (validated in step5_nbs_validation). The same seed (42) is
-used for every threshold, so the permutation structure is identical across
-thresholds — only the cluster-forming t differs. The 3 thresholds run in parallel.
+x=CONTROL, y=COVID (validated in step5_nbs_validation). Two one-sided directional
+contrasts (supervisor requirement) replace the former two-sided test:
+COVID>CONTROL (tail='left') and COVID<CONTROL (tail='right'), each at every
+cluster-forming threshold. The same seed (42) is used for every run, so the
+permutation structure is identical across runs — only the cluster-forming t and
+the one-sided tail differ. The 2 contrasts x 3 thresholds = 6 runs run in parallel.
 """
 
 import sys
@@ -31,9 +36,11 @@ N_PERM     = config.N_PERMUTATIONS
 N_NODES    = 400
 THRESHOLDS = config.NBS_THRESHOLDS
 PRIMARY_THRESHOLD = config.NBS_PRIMARY_THRESHOLD
-TAIL       = config.NBS_TAIL
+CONTRASTS  = config.NBS_CONTRASTS   # [(label, bct_tail), ...] one-sided, directional
+NBS_ALPHA  = config.NBS_ALPHA       # R2 ①: FWE 0.025 per directional contrast
 FISHER_CLIP = 0.999999   # MD §8 exception: step3f/step5a use 0.999999, not re-run
-N_JOBS_NBS = 3   # parallelize over the 3 thresholds (independent runs)
+# 2 contrasts x 3 thresholds = 6 independent runs; parallelize over all of them.
+N_JOBS_NBS = min(len(CONTRASTS) * len(THRESHOLDS), config.N_JOBS_DEFAULT)
 
 CSV_PATH = config.GROUP_CSV
 FC_DIR   = config.atlas_dir("schaefer400", "step2_pipeline") / "comet_matrices"
@@ -53,8 +60,10 @@ sys.stdout = TeeLogger(os.path.join(OUT_DIR, "nbs_console_log.txt"))
 print("=" * 70)
 print("Step 5 — NBS Schaefer-400 (Family C)")
 print(f"thresholds={THRESHOLDS} (primary={PRIMARY_THRESHOLD}), k={N_PERM}, "
-      f"tail='{TAIL}', seed={SEED}, parallel jobs={N_JOBS_NBS}")
-print("naive label permutation, no covariates; x=CONTROL, y=COVID")
+      f"seed={SEED}, parallel jobs={N_JOBS_NBS}")
+print(f"directional contrasts: {[c[0] for c in CONTRASTS]} "
+      f"(tails {[c[1] for c in CONTRASTS]}); x=CONTROL, y=COVID")
+print("label permutation on age + sex residualised edges (R2 ②)")
 print("=" * 70)
 
 from comet.graph import bct
@@ -109,6 +118,46 @@ print(
 assert max_asym < 1e-12, "Matrices not symmetric after symmetrization"
 
 # ============================================================
+# 2b) R2 ②: edge-wise age + sex residualisation (covariate adjustment)
+# ============================================================
+# NBS takes no design matrix, so age + sex are regressed out per edge BEFORE the
+# directional permutation. Same covariate model as Families A/B (mean-centred age
+# + 0/1-coded sex); reduced model only (NO group), so the group difference is
+# retained in the residuals while age/sex are removed. Vectorised: one design
+# matrix, one lstsq over all edges. Symmetry and zero diagonal are re-enforced
+# because they are relied on downstream (upper_edges, nbs_bct).
+print("\n[2b] Edge-wise age + sex residualisation (R2 ② covariate adjustment)")
+age = pd.to_numeric(meta.loc[subjects, "Edad"], errors="coerce").values.astype(float)
+if np.isnan(age).any():
+    bad = [s for s, a in zip(subjects, age) if np.isnan(a)]
+    raise AssertionError(f"non-numeric/missing age for: {bad}")
+sex_raw = meta.loc[subjects, "Genero"].astype(str).str.strip().values
+sex_cats = sorted(set(sex_raw))
+assert len(sex_cats) == 2, f"sex must have exactly 2 categories; found {sex_cats}"
+sex_map = {sex_cats[0]: 0.0, sex_cats[1]: 1.0}
+sex = np.array([sex_map[s] for s in sex_raw], float)
+age_c = age - age.mean()                                   # mean-centred (supervisor)
+X_nuis = np.column_stack([np.ones(len(subjects)), age_c, sex])   # 1 + age_c + sex
+print(f"    covariates: age mean={age.mean():.1f} [{age.min():.0f}-{age.max():.0f}] "
+      f"(centred), sex coding {sex_map}")
+
+# Residualise the (N, N, P) tensor edge-wise via a single least-squares solve.
+P = Z.shape[-1]
+Z_flat = Z.reshape(N_NODES * N_NODES, P).T                  # (P, N*N)
+beta_nuis, *_ = np.linalg.lstsq(X_nuis, Z_flat, rcond=None)
+Z_resid_flat = Z_flat - X_nuis @ beta_nuis                  # group NOT in model
+Z = Z_resid_flat.T.reshape(N_NODES, N_NODES, P)
+# Re-enforce exact symmetry + zero diagonal (identical design across (i,j)/(j,i)
+# keeps symmetry to float precision; make it exact for the downstream assert).
+Z = 0.5 * (Z + Z.transpose(1, 0, 2))
+for _s in range(P):
+    np.fill_diagonal(Z[..., _s], 0.0)
+resid_asym = max(np.abs(Z[..., s] - Z[..., s].T).max() for s in range(P))
+print(f"    residualised tensor {Z.shape}, range [{Z.min():.3f},{Z.max():.3f}], "
+      f"max|R-R.T|={resid_asym:.2e}")
+assert resid_asym < 1e-12, "Residualised matrices not symmetric"
+
+# ============================================================
 # 3) ROI info + per-edge descriptive Welch t (COVID - CONTROL)
 # ============================================================
 roi_df = pd.read_csv(ROI_INFO)
@@ -133,19 +182,24 @@ def upper_edges(adj, cid):
 # ============================================================
 # 4) Per-threshold NBS (parallelizable)
 # ============================================================
-def _run_one_threshold(Xc, Xv, thr, model_tag, edge_t, mfc_cov, mfc_ctl):
-    """One NBS run at one threshold. Independent across thresholds. Same seed for
-    every threshold so the permutation structure is identical (only t differs)."""
+def _run_one_threshold(Xc, Xv, thr, contrast_label, bct_tail, model_tag,
+                       edge_t, mfc_cov, mfc_ctl):
+    """One NBS run at one (contrast, threshold). Independent across runs. Same
+    seed everywhere so the permutation structure is identical; only the
+    cluster-forming t and the one-sided tail differ. Group order is fixed
+    x=CONTROL, y=COVID, so bct_tail encodes the directional contrast
+    ('left' -> COVID>CONTROL, 'right' -> COVID<CONTROL)."""
     tag = f"t{str(thr).replace('.', '')}"
-    comp_csv = OUT_DIR / f"nbs_components_{model_tag}_{tag}.csv"
-    edge_csv = OUT_DIR / f"nbs_edges_{model_tag}_{tag}.csv"
-    null_npz = OUT_DIR / f"nbs_null_{model_tag}_{tag}.npz"
+    stem = f"{model_tag}_{contrast_label}_{tag}"
+    comp_csv = OUT_DIR / f"nbs_components_{stem}.csv"
+    edge_csv = OUT_DIR / f"nbs_edges_{stem}.csv"
+    null_npz = OUT_DIR / f"nbs_null_{stem}.npz"
 
     if USE_CACHE and comp_csv.exists() and null_npz.exists():
-        return thr, pd.read_csv(comp_csv), "CACHE-HIT"
+        return contrast_label, thr, pd.read_csv(comp_csv), "CACHE-HIT"
 
     t0 = time.time()
-    pval, adj, null = bct.nbs_bct(Xc, Xv, thr, k=N_PERM, tail=TAIL,
+    pval, adj, null = bct.nbs_bct(Xc, Xv, thr, k=N_PERM, tail=bct_tail,
                                   paired=False, verbose=False, seed=SEED)
     pval = np.atleast_1d(np.asarray(pval))
     runtime = (time.time() - t0) / 60
@@ -158,15 +212,17 @@ def _run_one_threshold(Xc, Xv, thr, model_tag, edge_t, mfc_cov, mfc_ctl):
         ts = np.array([edge_t[i, j] for i, j in edges])
         p_fwer = float(pval[cid-1]) if cid-1 < len(pval) else np.nan
         comp_rows.append({
+            "contrast": contrast_label,
             "comp_id": cid, "n_edges": len(edges), "p_fwer": p_fwer,
             "mean_t": float(ts.mean()), "min_t": float(ts.min()),
             "max_t": float(ts.max()),
             "pct_positive_edges": float((ts > 0).mean()*100),
             "direction": "COVID>CONTROL" if ts.mean() > 0 else "COVID<CONTROL",
-            "is_significant": p_fwer < 0.05,
+            "is_significant": p_fwer < NBS_ALPHA,
         })
         for (i, j), t_ij in zip(edges, ts):
             edge_rows.append({
+                "contrast": contrast_label,
                 "threshold": thr, "comp_id": cid, "p_fwer": p_fwer,
                 "roi_i": i, "roi_j": j,
                 "label_i": roi_df.iloc[i][roi_label_col] if roi_label_col else "",
@@ -184,7 +240,7 @@ def _run_one_threshold(Xc, Xv, thr, model_tag, edge_t, mfc_cov, mfc_ctl):
     np.savez_compressed(null_npz, null=null, pval=pval, edge_t=edge_t)
     msg = (f"runtime {runtime:.1f} min, n_components={len(pval)}, "
            f"null max [{null.min():.0f},{np.median(null):.0f},{null.max():.0f}]")
-    return thr, comp_df, msg
+    return contrast_label, thr, comp_df, msg
 
 
 def run_model(tensor, model_tag):
@@ -193,36 +249,43 @@ def run_model(tensor, model_tag):
     edge_t, mfc_cov, mfc_ctl = edge_welch_t(tensor)
     print(f"\n{'='*64}\n[NBS] model={model_tag}  x=CONTROL(n={Xc.shape[-1]}), "
           f"y=COVID(n={Xv.shape[-1]})")
-    print(f"  parallelizing {len(THRESHOLDS)} thresholds over {N_JOBS_NBS} jobs "
+    n_runs = len(CONTRASTS) * len(THRESHOLDS)
+    print(f"  {len(CONTRASTS)} contrasts x {len(THRESHOLDS)} thresholds "
+          f"= {n_runs} runs over {N_JOBS_NBS} jobs "
           f"(per-perm progress suppressed)\n{'='*64}")
 
     results = Parallel(n_jobs=N_JOBS_NBS)(
-        delayed(_run_one_threshold)(Xc, Xv, thr, model_tag, edge_t, mfc_cov, mfc_ctl)
+        delayed(_run_one_threshold)(
+            Xc, Xv, thr, contrast_label, bct_tail,
+            model_tag, edge_t, mfc_cov, mfc_ctl)
+        for contrast_label, bct_tail in CONTRASTS
         for thr in THRESHOLDS)
 
     summary = []
-    for thr, comp_df, msg in sorted(results, key=lambda x: x[0]):
-        print(f"\n  t={thr}: {msg}")
+    for contrast_label, thr, comp_df, msg in sorted(
+            results, key=lambda x: (x[0], x[1])):
+        print(f"\n  [{contrast_label}] t={thr}: {msg}")
         if len(comp_df):
             print(comp_df.head(5).to_string(index=False))
         for _, r in comp_df.iterrows():
             summary.append({
-                "model": model_tag, "threshold": thr,
+                "model": model_tag, "contrast": contrast_label,
+                "threshold": thr,
                 "is_primary": thr == PRIMARY_THRESHOLD,
                 "comp_id": int(r["comp_id"]), "n_edges": int(r["n_edges"]),
                 "p_fwer": float(r["p_fwer"]), "mean_t": float(r["mean_t"]),
                 "direction": r.get("direction", ""),
-                "is_significant": bool(r["p_fwer"] < 0.05),
+                "is_significant": bool(r["p_fwer"] < NBS_ALPHA),
             })
     return summary
 
 # ============================================================
-# 5) RUN (single naive model; no covariate model)
+# 5) RUN (single model: age + sex residualised edges, R2 ②)
 # ============================================================
-all_summary = run_model(Z, "naive_no_covariates")
+all_summary = run_model(Z, "age_sex_residualised")
 
 summary_df = pd.DataFrame(all_summary).sort_values(
-    ["threshold", "p_fwer"]).reset_index(drop=True)
+    ["contrast", "threshold", "p_fwer"]).reset_index(drop=True)
 summary_df.to_csv(OUT_DIR / "nbs_summary.csv", index=False)
 
 # ============================================================
@@ -230,17 +293,23 @@ summary_df.to_csv(OUT_DIR / "nbs_summary.csv", index=False)
 # ============================================================
 print(f"\n{'='*64}\nNBS SUMMARY (Family C)\n{'='*64}")
 sub = summary_df
-for thr in THRESHOLDS:
-    s2 = sub[sub["threshold"] == thr]
-    n_sig = int(s2["is_significant"].sum())
-    min_p = s2["p_fwer"].min() if len(s2) else float("nan")
-    flag = " (PRIMARY)" if thr == PRIMARY_THRESHOLD else ""
-    print(f"  t={thr}{flag}: {len(s2)} components, {n_sig} significant "
-          f"(p_fwer<0.05), min p={min_p:.4f}")
-    for _, r in s2[s2["is_significant"]].iterrows():
-        print(f"      * comp {int(r['comp_id'])}: p={r['p_fwer']:.4f}, "
-              f"{int(r['n_edges'])} edges, {r['direction']}")
+for contrast_label, _ in CONTRASTS:
+    print(f"\n  contrast: {contrast_label}")
+    csub = sub[sub["contrast"] == contrast_label]
+    for thr in THRESHOLDS:
+        s2 = csub[csub["threshold"] == thr]
+        n_sig = int(s2["is_significant"].sum())
+        min_p = s2["p_fwer"].min() if len(s2) else float("nan")
+        flag = " (PRIMARY)" if thr == PRIMARY_THRESHOLD else ""
+        print(f"    t={thr}{flag}: {len(s2)} components, {n_sig} significant "
+              f"(p_fwer<{NBS_ALPHA}), min p={min_p:.4f}")
+        for _, r in s2[s2["is_significant"]].iterrows():
+            print(f"        * comp {int(r['comp_id'])}: p={r['p_fwer']:.4f}, "
+                  f"{int(r['n_edges'])} edges, {r['direction']}")
 
 print(f"\nSaved: {OUT_DIR / 'nbs_summary.csv'}")
-print("Naive label permutation, no covariates. Primary = t=3.1; sensitivity = t=2.5/3.5.")
+print(f"Age + sex residualised edges (R2 ②). Primary = t=3.1; sensitivity = t=2.5/3.5. "
+      f"FWE {NBS_ALPHA} per directional contrast.")
+print("One-sided directional contrasts: COVID>CONTROL (tail=left), "
+      "COVID<CONTROL (tail=right).")
 print("=" * 70)

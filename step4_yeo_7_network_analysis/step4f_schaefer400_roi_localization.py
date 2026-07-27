@@ -12,8 +12,10 @@ Out: step4f_roi_localization/<net>/{roi_d_values.csv, bar/glassbrain/
      distribution/volcano PNGs}, all_networks_roi_d_values.csv.
 
 Per ROI: within-network FC = mean Fisher-z FC to all other ROIs of the same
-network (z-then-mean). Naive label-permutation (Welch-t), FDR-BH within each
-network separately. Reuses naive_permutation/cohens_d from step3d_auc_pipeline.
+network (z-then-mean). R2 ②: Freedman-Lane residualised permutation (OLS
+group-coefficient t, age+sex adjusted), FDR-BH within each network separately.
+Reuses freedman_lane_vectorized/cohens_d from step3d_auc_pipeline (same
+covariate model as all outcomes). R1 (superseded): naive Welch-t, no covariates.
 """
 
 import sys
@@ -28,7 +30,7 @@ def _find_step3d_dir(root):
             return cand
     raise FileNotFoundError(f"step3d_auc_pipeline.py not found under {root}")
 sys.path.insert(0, str(_find_step3d_dir(_HERE.parents[1])))
-from step3d_auc_pipeline import naive_permutation, cohens_d
+from step3d_auc_pipeline import freedman_lane_vectorized, cohens_d, load_covariates
 
 import os
 import numpy as np
@@ -75,6 +77,17 @@ groups_all = np.array([group_map[s] for s in subjects])
 assert len(subjects) == 162 and (groups_all == "COVID").sum() == 123 \
     and (groups_all == "CONTROL").sum() == 39, "cohort deviates from frozen 162 (123/39)"
 
+# --- R2 ②: covariate model (age, sex) aligned to the `subjects` order, so it
+#     matches the fc matrix rows built per network below. Same loader/model as A/B/C.
+_cov_df, _sex_map = load_covariates(subjects)
+_cov_df = _cov_df.set_index("subject")
+assert _cov_df.index.is_unique, "duplicate subject IDs in covariate table"
+_missing_cov = [s for s in subjects if s not in _cov_df.index]
+if _missing_cov:
+    raise RuntimeError(f"covariates missing for {len(_missing_cov)} subject(s): {_missing_cov}")
+Z_ALL = _cov_df.loc[subjects, ["age", "sex_code"]].values.astype(float)
+print(f"Covariates: age + sex, Freedman-Lane (se_type={config.FL_SE_TYPE}), sex coding {_sex_map}")
+
 # Preload all matrices once (reused across the 3 networks)
 mats = {s: np.load(os.path.join(MATRIX_DIR, f"{s}_connectivity_comet.npy")) for s in subjects}
 for m in mats.values():
@@ -115,24 +128,26 @@ def analyze_network(net):
     out_dir  = config.ensure(OUT_ROOT / net)
     print(f"\n{'='*64}\nNetwork {net}: {n_roi} ROIs\n{'='*64}")
 
-    fc = roi_within_fc(net_idx)   # (n_subj, n_roi)
+    fc = roi_within_fc(net_idx)   # (n_subj, n_roi), subjects order
     groups = np.array([group_map[s] for s in subjects])
     g_int = (groups == GROUP_B).astype(int)   # CONTROL=0, COVID=1
 
-    # One reproducible substream per ROI (naive permutation)
-    substreams = np.random.SeedSequence(SEED).spawn(n_roi)
-
-    d_vals, ci_lo, ci_hi, p_perm, t_perm = [], [], [], [], []
+    # R2 ②: Freedman-Lane over all ROIs of this network in one vectorised call
+    # (OLS group-coefficient t, age+sex adjusted). Z_ALL and g_int follow the
+    # same `subjects` order as fc rows. Cohen's d + bootstrap CI stay per ROI
+    # (descriptive, unadjusted).
+    d_vals, ci_lo, ci_hi = [], [], []
     for r in range(n_roi):
         y = fc[:, r]
         a, b = y[g_int == 0], y[g_int == 1]   # a=CONTROL, b=COVID
         d, _, _ = cohens_d(a, b)
         lo, hi = bootstrap_ci_d(b, a, N_BOOT, SEED + r)
-        perm = naive_permutation(y, g_int, N_PERM, substreams[r])
         d_vals.append(d); ci_lo.append(lo); ci_hi.append(hi)
-        p_perm.append(perm["p_perm"]); t_perm.append(perm["t_obs"])
 
-    p_perm = np.array(p_perm)
+    t_obs_vec, p_perm, p_param = freedman_lane_vectorized(
+        fc, g_int.astype(float), Z_ALL, N_PERM, np.random.SeedSequence(SEED))
+    t_perm = list(t_obs_vec)
+    p_perm = np.asarray(p_perm)
     p_fdr  = multipletests(p_perm, alpha=FDR_Q, method="fdr_bh")[1]
 
     res = pd.DataFrame({
@@ -143,7 +158,7 @@ def analyze_network(net):
         "yeo_network": net,
         "cohens_d": d_vals, "ci_lo": ci_lo, "ci_hi": ci_hi,
         "t_perm": t_perm,
-        "p_perm": p_perm, "p_fdr": p_fdr,
+        "p_perm": p_perm, "p_param": p_param, "p_fdr": p_fdr,
     }).sort_values("cohens_d").reset_index(drop=True)
     res.to_csv(out_dir / f"{net}_roi_d_values.csv", index=False)
 
@@ -212,7 +227,7 @@ def _plots(res, net, out_dir, n_roi, n_fdr):
                     xytext=(6 if k % 2 == 0 else -16, 4), textcoords="offset points", zorder=4)
     ax.text(0.015, 0.97,
             f"EXPLORATORY localization (not a pre-specified family)\n"
-            f"Naive label-permutation, unadjusted; FDR-BH within {net}\n"
+            f"Freedman-Lane permutation, age+sex adjusted; FDR-BH within {net}\n"
             f"FDR q<{FDR_Q}: {n_fdr}/{n_roi} survive   "
             f"(min q={res['p_fdr'].min():.3f})",
             transform=ax.transAxes, va="top", ha="left", fontsize=8.5, style="italic",
@@ -222,7 +237,7 @@ def _plots(res, net, out_dir, n_roi, n_fdr):
     ax.set_xlim(-xmax, xmax)
     ax.set_xlabel("Cohen's d (COVID - CONTROL)"); ax.set_ylabel(r"$-\log_{10}(p_{\mathrm{perm}})$")
     ax.set_title(f"Within-{net} FC: ROI-level volcano (EXPLORATORY)\n"
-                 f"Naive label-permutation (unadjusted, {N_PERM} perm, seed={SEED}); n={n_roi}", fontsize=10)
+                 f"Freedman-Lane (age+sex adjusted, {N_PERM} perm, seed={SEED}); n={n_roi}", fontsize=10)
     ax.legend(loc="lower left", fontsize=8); ax.grid(alpha=0.3)
     plt.tight_layout(); plt.savefig(out_dir / f"{net}_volcano.png", dpi=150, bbox_inches="tight"); plt.close()
 

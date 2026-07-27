@@ -141,7 +141,23 @@ def run_pipeline(atlas_cfg, paths_cfg, processing_cfg):
             )
             try:
                 t0 = time.time()
-                ts = masker.fit_transform(nii_path)
+                # Partial-arm only: truncate the 4D image to a common length
+                # BEFORE the masker, so zscore_sample is computed on the truncated
+                # series and every subject enters Ledoit-Wolf at the same p/T
+                # regime. Pearson arm keeps the full series unchanged.
+                img_in = nii_path
+                if config.FC_METHOD == "partial":
+                    from nilearn.image import load_img, index_img
+                    img4d = load_img(nii_path)
+                    n_tp_orig = int(img4d.shape[-1])
+                    row["n_tp_original"] = n_tp_orig
+                    if n_tp_orig > config.PARTIAL_TRUNCATE_TP:
+                        img_in = index_img(
+                            img4d, slice(0, config.PARTIAL_TRUNCATE_TP))
+                        row["truncated"] = True
+                    else:
+                        row["truncated"] = False
+                ts = masker.fit_transform(img_in)
                 row["t_extract_s"]   = round(time.time() - t0, 2)
                 row["n_timepoints"]  = int(ts.shape[0])
                 row["n_parcels"]     = int(ts.shape[1])

@@ -29,8 +29,8 @@ PRE_ANALYSIS_DIR = AO / "pre_analysis"
 # cached results from another method. Both branches in make_connectivity() stay
 # active; only this constant selects which one runs.
 #
-FC_METHOD = "pearson"   # primary arm
-#FC_METHOD = "partial"     # partial-correlation sensitivity arm (Ledoit-Wolf shrinkage)
+#FC_METHOD = "pearson"   # primary arm
+FC_METHOD = "partial"     # partial-correlation sensitivity arm (Ledoit-Wolf shrinkage)
 
 # Covariance estimator for partial correlation. LedoitWolf shrinkage is required:
 # for Schaefer-400 (p=400 > T≈150) the unregularised precision matrix is singular
@@ -38,6 +38,16 @@ FC_METHOD = "pearson"   # primary arm
 # estimated per subject from the data (Varoquaux & Craddock, 2013).
 # Ignored when FC_METHOD != "partial".
 PARTIAL_COV_ESTIMATOR = "LedoitWolf"
+
+# Partial-arm time-series truncation. Every subject's series is truncated to a
+# common length so the precision-matrix conditioning (Ledoit-Wolf) is comparable
+# across subjects (supervisor requirement). Two acquisition lengths exist in the
+# cohort (140 / 200 volumes); 140 is the common floor. The first 140 volumes are
+# retained (DPABI preprocessing has already removed non-steady-state volumes, so
+# the leading frames are valid). Subjects with <=140 volumes are left unchanged.
+# Applied ONLY when FC_METHOD == "partial"; the Pearson arm keeps the full series
+# (scale-/length-tolerant), so this constant is ignored there.
+PARTIAL_TRUNCATE_TP = 140
 
 # Networks localized in step4f (ROI-level within-network localization).
 # Fixed illustrative selection, NOT a data-driven threshold: Pearson = the three
@@ -92,6 +102,11 @@ def make_connectivity(time_series, *, diagonal, fisher_z, tril=False):
 # The choice must NOT depend on group differences (that would be circular); it is
 # documented in METHODS_DECISIONS.
 SIGN_STRATEGIES = ["positive", "negative", "absolute"]   # diagnostic comparison set
+# Combined output trees that are NOT sign strategies but share the family_A/<name>
+# path shape. 'pos_neg_split' holds the partial-arm Family-A sign-split family
+# (positive + negative subgraphs, one FDR family, R2 ⑤). Listed explicitly so it
+# is a valid atlas_dir target without being treated as a sign strategy anywhere.
+COMBINED_STRATEGY_TREES = ["pos_neg_split"]
 
 # --- Diagnostic strategy set + graph-construction primitives -------------------
 # DIAGNOSTIC_SIGN_STRATEGIES is the LIST that steps 3a/3b/3c iterate over in the
@@ -223,8 +238,15 @@ def atlas_dir(atlas: str, subdir: str | None = None, *,
     if cross_strategy:
         root = base / "family_A" / "_cross_strategy"
     elif strategy is not None:
-        if strategy not in SIGN_STRATEGIES:
-            raise ValueError(f"bad strategy: {strategy!r}, expected one of {SIGN_STRATEGIES}")
+        # Sign strategies are the diagnostic set; COMBINED_STRATEGY_TREES are
+        # explicit combined output trees (e.g. the partial-arm 'pos_neg_split'
+        # sign-split family that spans positive+negative in one FDR family).
+        # Kept separate so a combined tree can never be mistaken for a sign
+        # strategy in step3a/b/c.
+        if strategy not in SIGN_STRATEGIES and strategy not in COMBINED_STRATEGY_TREES:
+            raise ValueError(
+                f"bad strategy: {strategy!r}, expected one of "
+                f"{SIGN_STRATEGIES} or a combined tree {COMBINED_STRATEGY_TREES}")
         root = base / "family_A" / strategy
     else:
         root = base
@@ -277,6 +299,11 @@ FISHER_CLIP = 0.9999
 N_PERMUTATIONS = 10000
 FDR_ALPHA      = 0.05
 
+# R2 ② Freedman–Lane covariate adjustment (age + sex, same model all outcomes).
+# Statistic = OLS group-coefficient t (confirmed primary). "HC3" available as a
+# documented heteroscedasticity sensitivity, not the primary analysis.
+FL_SE_TYPE = "nonrobust"   # "nonrobust" = OLS (primary) | "HC3" = robust sensitivity
+
 # Thresholding sweep (§4): proportional-threshold support points and AUC ranges.
 DENSITY_SUPPORT_POINTS = [0.01, 0.02, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.50]
 AUC_RANGE_CONFIRMATORY = (0.10, 0.25)   # primary; FDR family A
@@ -288,7 +315,22 @@ MODULARITY_N_RUNS = 100
 # NBS (§6 Family C): cluster-forming thresholds; FWER via component-extent null.
 NBS_THRESHOLDS        = [2.5, 3.1, 3.5]
 NBS_PRIMARY_THRESHOLD = 3.1
-NBS_TAIL              = "both"
+
+# NBS significance threshold per directional contrast (R2 ①, supervisor): the two
+# one-sided analyses run independently, each at FWE 0.025 (not 0.05). Slightly
+# conservative, statistically valid across the two directions, simple to document.
+NBS_ALPHA = 0.025
+
+# Directional NBS contrasts (supervisor requirement): one-sided tests replace the
+# former two-sided ('both') test. Group order at the call site is fixed x=CONTROL,
+# y=COVID (validated in step5_nbs_validation), so the bct.nbs_bct tail maps as:
+#   tail='left'  : mean(X) < mean(Y)  ->  CONTROL < COVID  ->  "COVID > CONTROL"
+#   tail='right' : mean(Y) < mean(X)  ->  COVID < CONTROL  ->  "COVID < CONTROL"
+# Each entry is (contrast_label, bct_tail). Both contrasts run at every threshold.
+NBS_CONTRASTS = [
+    ("COVID_gt_CONTROL", "left"),
+    ("COVID_lt_CONTROL", "right"),
+]
 
 # Direction convention for all group contrasts: d = COVID - CONTROL
 # (MD §6). Index 0 is the reference group, index 1 the contrast group.
@@ -304,60 +346,34 @@ GROUP_ORDER = ("CONTROL", "COVID")
 #   (b) it has a valid group label in GROUP_CSV (one of VALID_GROUPS), and
 #   (c) it is not listed in EXCLUDED_SUBJECTS below.
 #
-# IMPORTANT: exclusion is produced by BOTH gate (b) and gate (c). The 6 "no
-# metadata row" entries below are gate-b subjects (no valid group label) that
-# are ALSO listed here for documentation completeness; they are already removed
-# by the `labeled` check in select_included_subjects() regardless of their
-# presence in this dict, so listing them is redundant but harmless — it does
-# not change which subjects are excluded or the resulting N. The 34 gate-c
-# entries (2 scan-duration + 32 motion) are the genuine quality exclusions.
+# EXCLUDED_SUBJECTS is a SET of pseudonymised subject IDs only. Per-subject
+# exclusion reasons (scan-duration values, motion notes, metadata status) are
+# deliberately NOT stored here: the repository is public, and the ID→reason
+# mapping is withheld for data-protection reasons (supervisor decision). The
+# aggregate attrition is reported statistically in the thesis and below.
+#
+# IMPORTANT: exclusion is produced by BOTH gate (b) and gate (c). The 6 no-CSV-
+# metadata subjects are gate-b (no valid group label): already removed by the
+# `labeled` check in select_included_subjects() regardless of their presence in
+# this set, so their listing is redundant but harmless — it does not change which
+# subjects are excluded or the resulting N. The remaining entries (2 scan-duration
+# + 32 motion) are the genuine gate-c quality exclusions.
 #
 # Frozen analytical sample: N = 162 (123 COVID + 39 CONTROL).
 # Attrition from 202 NIfTI subjects: −2 scan-duration QC, −6 no-CSV-metadata,
 # −32 motion (28 COVID / 4 CONTROL; supervisor-curated motion-exclusion list).
 # Differential motion exclusion (COVID vs. CONTROL) is reported as a limitation.
 VALID_GROUPS = {"COVID", "CONTROL"}
+# Set of excluded subject IDs (reasons withheld — see block comment above).
+# Composition (aggregate, non-identifying): 2 scan-duration QC + 6 no-CSV-metadata
+# + 32 motion = 40 listed entries (the 6 metadata IDs are redundant with gate b).
 EXCLUDED_SUBJECTS = {
-    "CP0004": "scan duration 307 s — outside acquisition protocol",
-    "CP0011": "no metadata row in ResumenRespuestasBasico.csv",
-    "CP0015": "no metadata row in ResumenRespuestasBasico.csv",
-    "CP0038": "motion > threshold detected in preprocessing",
-    "CP0061": "motion > threshold detected in preprocessing",
-    "CP0062": "motion > threshold detected in preprocessing",
-    "CP0067": "motion > threshold detected in preprocessing",
-    "CP0072": "motion > threshold detected in preprocessing",
-    "CP0084": "motion > threshold detected in preprocessing",
-    "CP0087": "no metadata row in ResumenRespuestasBasico.csv",
-    "CP0096": "motion > threshold detected in preprocessing",
-    "CP0100": "motion > threshold detected in preprocessing",
-    "CP0105": "motion > threshold detected in preprocessing",
-    "CP0106": "no metadata row in ResumenRespuestasBasico.csv",
-    "CP0108": "motion > threshold detected in preprocessing",
-    "CP0110": "motion > threshold detected in preprocessing",
-    "CP0114": "motion > threshold detected in preprocessing",
-    "CP0115": "motion > threshold detected in preprocessing",
-    "CP0117": "motion > threshold detected in preprocessing",
-    "CP0128": "motion > threshold detected in preprocessing",
-    "CP0131": "motion > threshold detected in preprocessing",
-    "CP0135": "motion > threshold detected in preprocessing",
-    "CP0136": "motion > threshold detected in preprocessing",
-    "CP0140": "scan duration 351 s — outside acquisition protocol",
-    "CP0144": "no metadata row in ResumenRespuestasBasico.csv",
-    "CP0153": "motion > threshold detected in preprocessing",
-    "CP0159": "motion > threshold detected in preprocessing",
-    "CP0162": "motion > threshold detected in preprocessing",
-    "CP0170": "motion > threshold detected in preprocessing",
-    "CP0180": "motion > threshold detected in preprocessing",
-    "CP0185": "motion > threshold detected in preprocessing",
-    "CP0188": "motion > threshold detected in preprocessing",
-    "CP0193": "no metadata row in ResumenRespuestasBasico.csv",
-    "CP0202": "motion > threshold detected in preprocessing",
-    "CP0203": "motion > threshold detected in preprocessing",
-    "CP0214": "motion > threshold detected in preprocessing",
-    "CP0225": "motion > threshold detected in preprocessing",
-    "CP0233": "motion > threshold detected in preprocessing",
-    "CP0234": "motion > threshold detected in preprocessing",
-    "CP0238": "motion > threshold detected in preprocessing",
+    "CP0004", "CP0011", "CP0015", "CP0038", "CP0061", "CP0062", "CP0067",
+    "CP0072", "CP0084", "CP0087", "CP0096", "CP0100", "CP0105", "CP0106",
+    "CP0108", "CP0110", "CP0114", "CP0115", "CP0117", "CP0128", "CP0131",
+    "CP0135", "CP0136", "CP0140", "CP0144", "CP0153", "CP0159", "CP0162",
+    "CP0170", "CP0180", "CP0185", "CP0188", "CP0193", "CP0202", "CP0203",
+    "CP0214", "CP0225", "CP0233", "CP0234", "CP0238",
 }
 
 
