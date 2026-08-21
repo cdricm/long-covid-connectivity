@@ -153,7 +153,7 @@ def plot_distribution(ax, atlas_data, r_thresholds, atlas_names,
                               facecolor="white", edgecolor="grey", alpha=0.9))
 
     ax.set_xlabel("Pearson r")
-    ax.set_ylabel("density")
+    ax.set_ylabel("Proportion of edges per unit r")
     ax.set_xlim(-1, 1)
     ax.axvline(0, color="grey", linewidth=0.6, alpha=0.5, zorder=2)
     if title:
@@ -199,6 +199,37 @@ def main():
                       show_legend=True,
                       title="All atlases overlaid")
 
+    def plot_schaefer400_plain(atlas_data, out_dir: Path):
+        """Plain Pearson r distribution for Schaefer-400 — no density markers,
+        no AUC bands. Uses all edges of all included subjects (no subsampling)."""
+        atlas = "Schaefer-400"
+        vals = atlas_data[atlas]["values"]
+
+        fig, ax = plt.subplots(figsize=(7, 4.5))
+        ax.hist(vals, bins=200, range=(-1, 1),
+                histtype="stepfilled", linewidth=1.6,
+                color=ATLAS_COLORS[atlas], alpha=0.25,
+                density=True, zorder=2)
+        ax.hist(vals, bins=200, range=(-1, 1),
+                histtype="step", linewidth=1.8,
+                color=ATLAS_COLORS[atlas],
+                density=True, zorder=3)
+
+        ax.axvline(0, color="grey", linewidth=0.6, alpha=0.5, zorder=1)
+        ax.set_xlabel("Pearson r")
+        ax.set_ylabel("Proportion of edges per unit r")
+        ax.set_xlim(-1, 1)
+        ax.set_ylim(bottom=0)
+        ax.set_title(f"{atlas} — Pearson r distribution "
+                     f"(n_subj = {atlas_data[atlas]['n_subj']}, "
+                     f"{atlas_data[atlas]['n_edges_per_subj']} edges/subj)")
+
+        fig.tight_layout()
+        out_path = out_dir / "fc_distribution_schaefer400.png"
+        fig.savefig(out_path, dpi=200, bbox_inches="tight")
+        plt.close(fig)
+        print(f"Figure saved: {out_path}")
+
     atlas_list = list(atlas_data.keys())
     plot_positions = [(0, 1), (1, 0), (1, 1)]
     for (row, col), atlas in zip(plot_positions, atlas_list):
@@ -216,6 +247,7 @@ def main():
     fig.savefig(out_path, dpi=200, bbox_inches="tight")
     plt.close(fig)
     print(f"\nFigure saved: {out_path}")
+    plot_schaefer400_plain(atlas_data, OUT_DIR)
 
     print("\n" + "=" * 70)
     print("r-thresholds per atlas/density (mean across all edges/subjects)")

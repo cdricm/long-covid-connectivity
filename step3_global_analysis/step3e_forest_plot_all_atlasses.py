@@ -8,7 +8,7 @@ Out: config.CROSS_DIRS["step3e_forest_plot"]/forest_plot_family_a.png,
      volcano_plot_family_a.png.
 
 Significance shown in two tiers: filled star = survives FDR over the 4
-confirmatory tests (p_perm_fdr < 0.05); open/grey star = uncorrected primary
+primary tests (p_perm_fdr < 0.05); open/grey star = uncorrected primary
 only (p_perm < 0.05), not confirmatory.
 """
 
@@ -50,7 +50,7 @@ METRIC_LABELS = {
 # range_key strings ("literature"/"broad") are part of the frozen analysis
 # state (see step3d_auc_pipeline.compare_family_a) — not renamed.
 PANELS = [
-    ("literature", AUC_METRICS,  "AUC 10-25 %\n(CONFIRMATORY)"),
+    ("literature", AUC_METRICS,  "AUC 10-25 %\n(primary)"),
     ("broad",      AUC_METRICS,  "AUC 5-50 %\n(sensitivity)"),
     ("single",     [MOD_METRIC], "Modularity Q*\n(single value)"),
 ]
@@ -150,8 +150,8 @@ fig.legend(handles=sig_legend, loc="lower center", ncol=2, fontsize=9,
            framealpha=0.95, bbox_to_anchor=(0.5, -0.04))
 axes[2].legend(handles=sig_legend, loc="lower right", fontsize=8, framealpha=0.95)
 
-fig.suptitle("Family A — Cohen's d with 95 % CI across atlases  "
-             "(positive d -> COVID > CONTROL; Freedman–Lane permutation, "
+fig.suptitle("Global graph measures — Cohen's d with 95 % CI across atlases  "
+             "(positive d → COVID > CONTROL; Freedman–Lane permutation, "
              "age + sex adjusted)", fontsize=12, y=1.01)
 plt.tight_layout(rect=[0, 0.03, 1, 1])   # leave room at bottom for fig.legend
 out_png = os.path.join(OUT_DIR, "forest_plot_family_a.png")
@@ -166,7 +166,7 @@ METRIC_MARKERS = {
     "assortativity": "o", "mean_clustering": "s",
     "global_efficiency": "D", "modularity_q": "^",
 }
-VOLCANO_RANGES = [("literature", "AUC 10-25 % (confirmatory)"),
+VOLCANO_RANGES = [("literature", "AUC 10-25 % (primary)"),
                   ("broad",      "AUC 5-50 % (sensitivity)")]
 
 fig, axes = plt.subplots(1, 2, figsize=(13, 6), sharex=True, sharey=True)
@@ -199,13 +199,14 @@ atlas_legend = [Line2D([0], [0], marker="o", color="w",
 metric_legend = [Line2D([0], [0], marker=METRIC_MARKERS[m], color="black",
                         linestyle="None", label=METRIC_LABELS[m], markersize=8)
                  for m in AUC_METRICS + [MOD_METRIC]]
-leg1 = axes[1].legend(handles=atlas_legend, title="Atlas", loc="upper right",
-                      fontsize=9, framealpha=0.95)
+leg1 = axes[1].legend(handles=atlas_legend, title="Atlas", loc="lower right", bbox_to_anchor=(1, 0.20),
+               fontsize=9, framealpha=0.95)
+axes[1].add_artist(leg1)
 axes[1].add_artist(leg1)
 axes[1].legend(handles=metric_legend, title="Metric", loc="lower right",
                fontsize=8, framealpha=0.95)
 
-fig.suptitle("Family A volcano — effect size vs primary permutation p\n"
+fig.suptitle("Global graph measures — effect size vs primary permutation p\n"
              "(modularity Q* shown on both panels as a range-independent "
              "reference; line = p_perm 0.05, uncorrected)", fontsize=11)
 plt.tight_layout()

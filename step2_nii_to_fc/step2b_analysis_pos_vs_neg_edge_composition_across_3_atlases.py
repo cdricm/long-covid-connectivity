@@ -161,7 +161,7 @@ def make_figure(stats: dict, arm: str, atlases: list[str], out_path: Path):
     ax.set_ylabel("Fraction of edges (%)")
     ax.set_ylim(0, 105)
     ax.set_title("Edge composition")
-    ax.legend(loc="upper right", framealpha=0.9)
+    ax.legend(loc="lower left", bbox_to_anchor=(0, 0.98), framealpha=0.9)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
 

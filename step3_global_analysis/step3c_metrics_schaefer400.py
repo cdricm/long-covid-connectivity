@@ -2,7 +2,7 @@
 
 Three density-dependent weighted metrics (Global Efficiency, Mean Clustering,
 Assortativity) swept across densities, run as a group-blind DIAGNOSTIC over all sign
-strategies (like step3a/3b) and written to the _cross_strategy tree, one subfolder per
+strategies (like ste<p3a/3b) and written to the _cross_strategy tree, one subfolder per
 strategy. The sweep spans 5-100 % for visualization; AUC inference (step3d) uses the
 10-25 % confirmatory and 5-50 % sensitivity subsets.
 

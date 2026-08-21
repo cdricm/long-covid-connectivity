@@ -29,8 +29,8 @@ PRE_ANALYSIS_DIR = AO / "pre_analysis"
 # cached results from another method. Both branches in make_connectivity() stay
 # active; only this constant selects which one runs.
 #
-#FC_METHOD = "pearson"   # primary arm
-FC_METHOD = "partial"     # partial-correlation sensitivity arm (Ledoit-Wolf shrinkage)
+FC_METHOD = "pearson"   # primary arm
+#FC_METHOD = "partial"     # partial-correlation sensitivity arm (Ledoit-Wolf shrinkage)
 
 # Covariance estimator for partial correlation. LedoitWolf shrinkage is required:
 # for Schaefer-400 (p=400 > T≈150) the unregularised precision matrix is singular

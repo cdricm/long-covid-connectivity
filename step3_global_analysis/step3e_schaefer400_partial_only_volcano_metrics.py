@@ -1,6 +1,6 @@
 """
-Family A volcano for the partial-correlation analysis (Schaefer-400 only,
-partial arm only).
+Global graph measures volcano for the partial-correlation analysis
+(Schaefer-400 only, partial arm only).
 
 In: family_a_comparison.csv, via
     config.atlas_dir("schaefer400", "step3d_auc", strategy=STRATEGY).
@@ -9,6 +9,8 @@ Out: config.atlas_dir("schaefer400", "step3e_volcano", strategy=STRATEGY)/
 
 Colour encodes FDR tier (red = survives FDR over the 4 confirmatory tests,
 blue = does not) instead of atlas, since there is only one atlas here.
+The FDR-tier and subgraph legends are drawn only if the plotted data
+actually contain the corresponding category.
 """
 
 import sys
@@ -54,8 +56,12 @@ METRIC_MARKERS = {
 COLOR_NS  = "#1f77b4"   # not FDR-significant
 COLOR_SIG = "#d62728"   # survives FDR over the 4 confirmatory tests
 
-VOLCANO_RANGES = [("literature", "AUC 10-25 % (confirmatory)"),
-                  ("broad",      "AUC 5-50 % (sensitivity)")]
+# typographic constants: true minus sign and en dash for the figure text
+MINUS = "\u2212"
+ENDASH = "\u2013"
+
+VOLCANO_RANGES = [("literature", f"AUC 10{ENDASH}25 % (primary range)"),
+                  ("broad",      f"AUC 5{ENDASH}50 % (sensitivity)")]
 
 OUT_DIR = config.ensure(config.atlas_dir(ATLAS, "step3e_volcano", strategy=_FAMILY_A_STRATEGY))
 
@@ -77,6 +83,10 @@ if missing:
 # ============================================================
 fig, axes = plt.subplots(1, 2, figsize=(13, 6), sharex=True, sharey=True)
 
+# track which legend categories actually occur in the plotted data
+any_fdr_significant = False
+any_negative_subgraph = False
+
 for ax, (rng, title) in zip(axes, VOLCANO_RANGES):
     sub = all_df[all_df["range"] == rng].copy()
     # include modularity (single) on each panel as a range-independent reference point
@@ -88,6 +98,10 @@ for ax, (rng, title) in zip(axes, VOLCANO_RANGES):
         fdr = r["p_perm_fdr"]
         survives = pd.notna(fdr) and fdr < 0.05
         sg = r.get("subgraph", "positive")
+        if survives:
+            any_fdr_significant = True
+        if sg == "negative":
+            any_negative_subgraph = True
         base_col = COLOR_SIG if survives else COLOR_NS
         # positive subgraph = filled; negative subgraph = open (face='none').
         ax.scatter(r["cohen_d"], r["neg_log10_p"],
@@ -98,37 +112,46 @@ for ax, (rng, title) in zip(axes, VOLCANO_RANGES):
     ax.axvline(0, color="black", linestyle="--", linewidth=0.8)
     ax.axhline(-np.log10(0.05), color="gray", linestyle="--", linewidth=1)
     ax.set_title(title, fontsize=11)
-    ax.set_xlabel("Cohen's d (COVID - CONTROL)", fontsize=10)
+    ax.set_xlabel(f"Cohen's d (COVID {MINUS} CONTROL)", fontsize=10)
     ax.grid(alpha=0.3)
 
-axes[0].set_ylabel("-log10(p_perm)  [primary, Freedman-Lane permutation]", fontsize=10)
+axes[0].set_ylabel(f"{MINUS}log10(p_perm)  [primary, Freedman-Lane permutation]",
+                   fontsize=10)
 
+# --- legends -------------------------------------------------
+# The metric legend is always needed: it is the only key to the marker shapes.
 metric_legend = [Line2D([0], [0], marker=METRIC_MARKERS[m], color="black",
                         linestyle="None", label=METRIC_LABELS[m], markersize=8)
                  for m in AUC_METRICS + [MOD_METRIC]]
-tier_legend = [
-    Line2D([0], [0], marker="o", color=COLOR_SIG, linestyle="None",
-           markersize=9, label="FDR-sig. (p_fdr<0.05)"),
-    Line2D([0], [0], marker="o", color=COLOR_NS, linestyle="None",
-           markersize=9, label="not FDR-sig."),
-]
-leg1 = axes[1].legend(handles=metric_legend, title="Metric", loc="upper right",
-                      fontsize=9, framealpha=0.95)
-axes[1].add_artist(leg1)
-subgraph_legend = [
-    Line2D([0], [0], marker="o", color="black", markerfacecolor="black",
-           linestyle="None", markersize=9, label="positive subgraph"),
-    Line2D([0], [0], marker="o", color="black", markerfacecolor="none",
-           linestyle="None", markersize=9, label="negative subgraph"),
-]
-leg_sg = axes[0].legend(handles=subgraph_legend, title="Subgraph (⑤)",
-                        loc="upper right", fontsize=8, framealpha=0.95)
-axes[0].add_artist(leg_sg)
-axes[1].legend(handles=tier_legend, title="FDR tier", loc="lower right",
-               fontsize=8, framealpha=0.95)
+leg_metric = axes[1].legend(handles=metric_legend, title="Metric",
+                            loc="upper right", fontsize=9, framealpha=0.95)
+axes[1].add_artist(leg_metric)
 
-fig.suptitle(f"Family A volcano ({ATLAS_LABEL}, partial correlations, "
-             f"{STRATEGY}) — effect size vs primary permutation p\n"
+# The subgraph legend is only informative if open markers actually appear.
+if any_negative_subgraph:
+    subgraph_legend = [
+        Line2D([0], [0], marker="o", color="black", markerfacecolor="black",
+               linestyle="None", markersize=9, label="positive subgraph"),
+        Line2D([0], [0], marker="o", color="black", markerfacecolor="none",
+               linestyle="None", markersize=9, label="negative subgraph"),
+    ]
+    leg_sg = axes[0].legend(handles=subgraph_legend, title="Subgraph",
+                            loc="upper right", fontsize=8, framealpha=0.95)
+    axes[0].add_artist(leg_sg)
+
+# The FDR-tier legend is only informative if a red point actually appears.
+if any_fdr_significant:
+    tier_legend = [
+        Line2D([0], [0], marker="o", color=COLOR_SIG, linestyle="None",
+               markersize=9, label="FDR-sig. (p_fdr<0.05)"),
+        Line2D([0], [0], marker="o", color=COLOR_NS, linestyle="None",
+               markersize=9, label="not FDR-sig."),
+    ]
+    axes[1].legend(handles=tier_legend, title="FDR tier", loc="lower right",
+                   fontsize=8, framealpha=0.95)
+
+fig.suptitle(f"Global graph measures ({ATLAS_LABEL}, partial correlations, "
+             f"{STRATEGY}) {ENDASH} effect size vs primary permutation p\n"
              "(modularity Q* shown on both panels as a range-independent "
              "reference; line = p_perm 0.05, uncorrected)", fontsize=11)
 plt.tight_layout()
@@ -157,3 +180,7 @@ for rng, _ in VOLCANO_RANGES + [("single", "")]:
             print(f"  {name:28s} "
                   f"d={r['cohen_d']:+.3f} [{r['d_ci_lo']:+.2f},{r['d_ci_hi']:+.2f}]  "
                   f"p_perm={r['p_perm']:.3f}  p_fdr={fdr_s} {tier}")
+
+print(f"\nLegends drawn: metric=yes, "
+      f"subgraph={'yes' if any_negative_subgraph else 'no'}, "
+      f"fdr_tier={'yes' if any_fdr_significant else 'no'}")
