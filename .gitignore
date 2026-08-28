@@ -1,6 +1,0 @@
-*.npy
-connectivity_matrices/
-ResumenRespuestasBasico.csv
-*.nii*
-.idea/
-__pycache__/
